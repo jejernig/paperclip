@@ -21145,9 +21145,10 @@ export function heartbeatService(
       });
       // A live holder is always consulted for shared workspaces. Depending on policy and the final
       // execution target it either remains the existing deferral gate or becomes dispatch context.
-      // Local/SSH folders never take an exclusive workspace lock, including when older
-      // project or issue settings request serialization. Sandbox protection still uses
-      // the existing holder staleness and workspace_busy retry ladder.
+      // Under the "auto" default, local/SSH folders don't take an exclusive workspace lock —
+      // they're assumed not to race each other on the same driver. An explicit "serialize"
+      // policy overrides that assumption for every driver, local/SSH included. Sandbox
+      // protection still uses the existing holder staleness and workspace_busy retry ladder.
       if (
         issueRef?.projectWorkspaceId &&
         effectiveExecutionWorkspaceMode === "shared_workspace"
@@ -21165,6 +21166,7 @@ export function heartbeatService(
           const shouldSerialize =
             sharedWorkspaceConcurrency !== "allow" &&
             (executionForcedToKubernetes ||
+              sharedWorkspaceConcurrency === "serialize" ||
               (environmentDriver !== "local" &&
                 environmentDriver !== "ssh"));
           if (shouldSerialize) {

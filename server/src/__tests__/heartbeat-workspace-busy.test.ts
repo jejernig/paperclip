@@ -237,8 +237,10 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     const agentId = randomUUID();
     const issueId = randomUUID();
     const nonAssigneeAgentId = randomUUID();
-    // Deferral/retry tests exercise sandbox protection. Local and SSH folders
-    // must remain concurrent even when an older policy requests serialization.
+    // Deferral/retry tests default to a sandbox environment, which always
+    // takes the exclusive lock. Local and SSH folders only stay concurrent
+    // under the "auto" default policy; an explicit "serialize" policy defers
+    // them the same as any other driver (see the it.each below).
     const agentEnvironmentDriver = input?.agentEnvironmentDriver ?? "sandbox";
     const agentEnvironmentId = agentEnvironmentDriver === "local" ? null : randomUUID();
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
@@ -465,7 +467,7 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     { driver: "local", policySource: "project" },
     { driver: "ssh", policySource: "issue" },
     { driver: "ssh", policySource: "project" },
-  ] as const)("dispatches on $driver despite a $policySource serialize policy", async ({ driver, policySource }) => {
+  ] as const)("defers on $driver when a $policySource serialize policy is explicitly requested", async ({ driver, policySource }) => {
     const fixture = await seedWorkspaceFixture({
       agentEnvironmentDriver: driver,
       issueWorkspaceSettings: policySource === "issue" ? { sharedWorkspaceConcurrency: "serialize" } : null,
@@ -483,17 +485,18 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     expect(run).not.toBeNull();
 
     const finishedRun = await waitForRunToLeaveActiveStates(run!.id);
-    expect(finishedRun?.status).toBe("succeeded");
-    expect(finishedRun?.errorCode).not.toBe(WORKSPACE_BUSY_ERROR_CODE);
-    expect(executedRunIds).toContain(run!.id);
-    expect(executedInputs.get(run!.id)?.context.paperclipTaskMarkdown).toContain(
-      `shared workspace is concurrently held by run ${fixture.holderRunId}`,
-    );
+    expect(finishedRun?.status).toBe("cancelled");
+    expect(finishedRun?.errorCode).toBe(WORKSPACE_BUSY_ERROR_CODE);
+    expect(executedRunIds).not.toContain(run!.id);
+
+    const retryRun = await waitForRetryRun(run!.id);
+    expect(retryRun).toMatchObject({
+      status: "scheduled_retry",
+      scheduledRetryReason: WORKSPACE_BUSY_RETRY_REASON,
+    });
+
+    // The holder was left undisturbed by the deferral.
     expect((await heartbeat.getRun(fixture.holderRunId))?.status).toBe("running");
-    const retryRuns = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(
-      and(eq(heartbeatRuns.companyId, fixture.companyId), eq(heartbeatRuns.scheduledRetryReason, WORKSPACE_BUSY_RETRY_REASON)),
-    );
-    expect(retryRuns).toHaveLength(0);
   });
 
   it("allow passes the busy gate for a sandbox environment and adds coordination context", async () => {
